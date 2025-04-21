@@ -1,12 +1,3 @@
-# ================================================================================================
-# Code for paper 'Deep Supervised Auto-encoder Hashing for Image Retrieval'.
-# Currently, you may not use this file for any purpose unless you got permission from the author.
-# Author: Sanli Tang
-# Email: tangsanli@sjtu.edu.cn
-# Organization: Shanghai Jiaotong Univ.
-# Modified Time: 2017/10/25
-# ================================================================================================
-
 import keras
 import numpy as np
 from keras.datasets import cifar10, mnist
