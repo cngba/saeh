@@ -7,6 +7,8 @@ from keras import optimizers
 import matplotlib.pyplot as plt
 from PIL import Image
 import os
+import psutil
+import time
 import numpy as np
 import pandas as pd
 import hash_model
@@ -94,7 +96,7 @@ def retrieve_and_plot_nearest(image_folder, hash_table, index, top_k=11):
     print(f"Nearest {top_k} hashes for index {index}:")
     for i, (nearest_index, dist) in enumerate(zip(nearest_indices, nearest_distances)):
         print(f"{i + 1}. Index: {nearest_index}, Hamming Distance: {dist:.4f}")
-    refined_indices = refine_ranking(resnet, x_train, hash_table, args.index, nearest_indices, top_k=args.top_k)
+    
     plot_similar_images(image_folder, hash_table, index, refined_indices)
 
 # Function to load the hash table from a CSV file
@@ -149,6 +151,115 @@ def refine_ranking(model, image_data, hash_table, index, nearest_indices, top_k=
     refined_indices = [nearest_indices[i] for i in sorted_indices[:top_k]]
 
     return refined_indices
+
+# Function to log memory usage
+def log_memory_usage(stage=""):
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    print(f"[{stage}] Memory Usage: {memory_info.rss / (1024 ** 2):.2f} MB")
+
+# Function to measure execution time
+def time_execution(func, *args, **kwargs):
+    start_time = time.time()
+    result = func(*args, **kwargs)
+    end_time = time.time()
+    print(f"Execution Time for {func.__name__}: {end_time - start_time:.2f} seconds")
+    return result
+
+
+# Function to evaluate the model
+def evaluate_model(model, x_test, y_test, hash_table_path, top_k=10):
+    print("\nStarting Evaluation...")
+    log_memory_usage(stage="Evaluation Start")
+
+    # Predict outputs
+    y_predict, y_decoded = model.predict(x_test, batch_size=64)
+
+    # Reconstruction Loss
+    reconstruction_loss = np.mean(np.square(x_test - y_decoded))
+    print(f"Reconstruction Loss (MSE): {reconstruction_loss}")
+
+    # Classification Accuracy
+    y_pred_classes = np.argmax(y_predict, axis=1)
+    y_true_classes = np.argmax(y_test, axis=1)
+    accuracy = np.mean(y_pred_classes == y_true_classes)
+    print(f"Classification Accuracy: {accuracy}")
+
+    # Load Hash Table
+    hash_table = load_hash_table(hash_table_path)
+
+    # Evaluate Retrieval Metrics
+    subset_size = 100  # Use a subset for faster evaluation
+    hash_table_subset = hash_table[:subset_size]
+    y_true_classes_subset = y_true_classes[:subset_size]
+
+    precision_at_k_values = []
+    average_precisions = []
+    for i in range(len(hash_table_subset)):
+        query_hash = hash_table_subset[i]
+        distances = np.sum(query_hash != hash_table, axis=1) / hash_table.shape[1]
+        sorted_indices = np.argsort(distances)[:top_k]
+
+        relevant_indices = np.where(y_true_classes == y_true_classes_subset[i])[0]
+        retrieved_indices = sorted_indices
+
+        precision_at_k = len(set(relevant_indices) & set(retrieved_indices)) / top_k
+        precision_at_k_values.append(precision_at_k)
+
+        precisions = []
+        for k in range(1, top_k + 1):
+            if retrieved_indices[k - 1] in relevant_indices:
+                precisions.append(len(set(relevant_indices) & set(retrieved_indices[:k])) / k)
+        if precisions:
+            average_precisions.append(np.mean(precisions))
+
+    mean_precision_at_k = np.mean(precision_at_k_values)
+    mean_average_precision = np.mean(average_precisions)
+    print(f"Mean Precision@{top_k}: {mean_precision_at_k}")
+    print(f"Mean Average Precision (mAP): {mean_average_precision}")
+
+    log_memory_usage(stage="Evaluation End")
+    return {
+        "reconstruction_loss": reconstruction_loss,
+        "classification_accuracy": accuracy,
+        "mean_precision_at_k": mean_precision_at_k,
+        "mean_average_precision": mean_average_precision
+    }
+
+
+def plot_training_metrics(training_log_path):
+    # Load the training log
+    df = pd.read_csv(training_log_path)
+
+    # Plot Loss
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(df['epoch'], df['loss'], label='Training Loss', color='blue')
+    plt.plot(df['epoch'], df['val_loss'], label='Validation Loss', color='orange')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+
+    # Plot Accuracy
+    plt.subplot(1, 2, 2)
+    if 'y_predict_accuracy' in df.columns and 'val_y_predict_accuracy' in df.columns:
+        plt.plot(df['epoch'], df['y_predict_accuracy'], label='Training Accuracy', color='blue')
+        plt.plot(df['epoch'], df['val_y_predict_accuracy'], label='Validation Accuracy', color='orange')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.title('Training and Validation Accuracy')
+        plt.legend()
+    else:
+        print("Accuracy columns not found in training log. Skipping accuracy plot.")
+
+    # Save and Show the Plot
+    plot_path = os.path.join(os.path.dirname(training_log_path), "training_metrics.png")
+    plt.tight_layout()
+    plt.savefig(plot_path)
+    print(f"Training metrics plot saved to '{plot_path}'")
+    plt.show()
+
 
 # Main function
 if __name__ == '__main__':
@@ -206,14 +317,46 @@ if __name__ == '__main__':
         save_hash_table(resnet, x_train, file_path=hash_table_path)
 
     elif args.mode == 'retrieval':
+        # Load test data
+        (x_train, y_train), (x_test, y_test) = load_data.load_data(which_data)
+        (_, img_rows, img_cols, img_channels) = x_train.shape
+
+        # Load the trained model
+        model_path = save_path + "hash_su_ae.h5"
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Trained model not found at '{model_path}'. Train the model first.")
+        resnet = load_model(model_path, custom_objects={'net_loss': hash_model.HashSupervisedAutoEncoderModel.net_loss})
         hash_table_path = save_path + "hash_table_64.csv"
         hash_table = load_hash_table(hash_table_path)
         nearest_indices, nearest_distances = retrieve_nearest(hash_table, args.index, top_k=args.top_k)
-        
+        refined_indices = refine_ranking(resnet, x_train, hash_table, args.index, nearest_indices, top_k=args.top_k)
         print(f"Nearest {args.top_k} hashes for index {args.index}:")
         for i, (idx, dist) in enumerate(zip(nearest_indices, nearest_distances)):
             print(f"{i + 1}. Index: {idx}, Hamming Distance: {dist:.4f}")
         retrieve_and_plot_nearest(args.image_folder, hash_table, args.index, top_k=args.top_k)    
+    
+    elif args.mode == 'evaluation':
+        # Load test data
+        (x_train, y_train), (x_test, y_test) = load_data.load_data(which_data)
+        (_, img_rows, img_cols, img_channels) = x_train.shape
+
+        # Load the trained model
+        model_path = save_path + "hash_su_ae.h5"
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Trained model not found at '{model_path}'. Train the model first.")
+        resnet = load_model(model_path, custom_objects={'net_loss': hash_model.HashSupervisedAutoEncoderModel.net_loss})
+
+        # Evaluate the model
+        hash_table_path = save_path + "hash_table_" + str(hash_bits) + ".csv"
+        evaluation_results = evaluate_model(resnet, x_test, y_test, hash_table_path)
+
+        print("\nEvaluation Results:")
+        for metric, value in evaluation_results.items():
+            print(f"{metric}: {value}")
+        # Plot training metrics
+        training_log_path = save_path + "training_log.csv"
+        plot_training_metrics(training_log_path)
+
 """
 ### Usage:
 1. **Training Mode**:
