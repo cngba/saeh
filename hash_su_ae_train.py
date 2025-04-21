@@ -15,7 +15,9 @@ import hash_model
 import load_data
 import argparse
 from scipy.spatial.distance import cdist
-from sklearn.metrics.pairwise import cosine_similarity
+
+TF_ENABLE_ONEDNN_OPTS=0
+
 which_data = "cifar10"  
 num_classes = 10       
 stack_num = 18    # number of stack in the ResNet network
@@ -50,7 +52,7 @@ def scheduler(epoch):
     return 0.0008
 
 # Function to save hash table to a CSV file
-def save_hash_table(model, data, file_path='hash_table.csv'):
+def save_hash_table(model, data, file_path="hash_table_" + str(hash_bits) + ".csv"):
     # Extract hash codes
     hash_layer_model = Model(inputs=model.input, outputs=model.get_layer('hash_x').output)
     hash_codes = hash_layer_model.predict(data)
@@ -72,7 +74,7 @@ def plot_similar_images(image_folder, hash_table, index, nearest_indices):
     plt.figure(figsize=(12, 6))
     plt.subplot(1, len(nearest_indices) + 1, 1)
     plt.imshow(input_image)
-    plt.title(f"Input Image\nIndex {index}")
+    plt.title(f"Input Image\n{index}")
     plt.axis('off')
 
     # Plot nearest images
@@ -84,11 +86,14 @@ def plot_similar_images(image_folder, hash_table, index, nearest_indices):
         nearest_image = Image.open(nearest_image_path)
         plt.subplot(1, len(nearest_indices) + 1, i + 2)
         plt.imshow(nearest_image)
-        plt.title(f"Neighbor {i + 1}\nIndex {nearest_index}")
+        plt.title(f"Nearest {i + 1}\n{nearest_index}")
         plt.axis('off')
 
     plt.tight_layout()
+    plt.savefig(os.path.join(save_path, f'nearest_images_{index}.png'))
+    print(f"Nearest images plotted and saved as 'nearest_images_{index}.png' in {save_path}")
     plt.show()
+    
 
 # Function to retrieve and plot nearest images
 def retrieve_and_plot_nearest(image_folder, hash_table, index, top_k=11):
@@ -96,8 +101,8 @@ def retrieve_and_plot_nearest(image_folder, hash_table, index, top_k=11):
     print(f"Nearest {top_k} hashes for index {index}:")
     for i, (nearest_index, dist) in enumerate(zip(nearest_indices, nearest_distances)):
         print(f"{i + 1}. Index: {nearest_index}, Hamming Distance: {dist:.4f}")
-    
-    plot_similar_images(image_folder, hash_table, index, refined_indices)
+
+    plot_similar_images(image_folder, hash_table, index, nearest_indices)
 
 # Function to load the hash table from a CSV file
 def load_hash_table(file_path):
@@ -116,42 +121,6 @@ def retrieve_nearest(hash_table, index, top_k=11):
     nearest_distances = distances[nearest_indices]  # Get the corresponding distances
     return nearest_indices, nearest_distances
 
-# Refine the ranking of the retrieved images using feature similarity (cosine).
-def refine_ranking(model, image_data, hash_table, index, nearest_indices, top_k=11, feature_layer='hash_x'):
-    """
-    Parameters:
-    - model: The trained Keras model containing the encoder.
-    - image_data: The complete dataset of input images (e.g., x_train).
-    - hash_table: The hash table for fast lookup (not directly used here, but kept for compatibility).
-    - index: Index of the query image in the dataset.
-    - nearest_indices: Initial nearest indices obtained from hash-based retrieval.
-    - top_k: Number of top images to return after re-ranking.
-    - feature_layer: Layer name from which to extract features for re-ranking.
-
-    Returns:
-    - refined_indices: Re-ranked indices based on feature similarity.
-    """
-
-    # Create a model to extract intermediate features from the encoder
-    feature_extractor = Model(inputs=model.input, outputs=model.get_layer(feature_layer).output)
-
-    # Extract features for the query image
-    query_image = image_data[index:index+1]  # Shape (1, H, W, C)
-    query_feature = feature_extractor.predict(query_image)  # Shape (1, D)
-
-    # Extract features for all initially retrieved images
-    retrieved_images = image_data[nearest_indices]  # Shape (top_k, H, W, C)
-    retrieved_features = feature_extractor.predict(retrieved_images)  # Shape (top_k, D)
-
-    # Compute cosine similarity between query and retrieved features
-    similarity_scores = cosine_similarity(query_feature, retrieved_features)[0]  # Shape (top_k,)
-
-    # Sort the retrieved indices based on similarity score in descending order
-    sorted_indices = np.argsort(-similarity_scores)  # Highest similarity first
-    refined_indices = [nearest_indices[i] for i in sorted_indices[:top_k]]
-
-    return refined_indices
-
 # Function to log memory usage
 def log_memory_usage(stage=""):
     process = psutil.Process(os.getpid())
@@ -165,7 +134,6 @@ def time_execution(func, *args, **kwargs):
     end_time = time.time()
     print(f"Execution Time for {func.__name__}: {end_time - start_time:.2f} seconds")
     return result
-
 
 # Function to evaluate the model
 def evaluate_model(model, x_test, y_test, hash_table_path, top_k=10):
@@ -226,7 +194,6 @@ def evaluate_model(model, x_test, y_test, hash_table_path, top_k=10):
         "mean_average_precision": mean_average_precision
     }
 
-
 def plot_training_metrics(training_log_path):
     # Load the training log
     df = pd.read_csv(training_log_path)
@@ -260,12 +227,11 @@ def plot_training_metrics(training_log_path):
     print(f"Training metrics plot saved to '{plot_path}'")
     plt.show()
 
-
 # Main function
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Supervised Autoencoder Hashing")
-    parser.add_argument('--mode', type=str, choices=['train', 'retrieval'], default='train',
-                        help="Mode of operation: 'train' to train the model, 'retrieval' for hash retrieval.")
+    parser.add_argument('--mode', type=str, choices=['train', 'retrieval', 'evaluation'], default='train',
+                        help="Mode of operation: 'train' to train the model, 'retrieval' for hash retrieval, 'evaluation' to evaluate the model.")
     parser.add_argument('--index', type=int, default=0,
                         help="Index of the hash to retrieve nearest neighbors (used in 'retrieval' mode).")
     parser.add_argument('--top_k', type=int, default=11,
@@ -313,28 +279,19 @@ if __name__ == '__main__':
         resnet.save(save_path+"hash_su_ae.h5")
         print(f"Model saved at '{save_path}hash_su_ae.h5'")
 
-        hash_table_path = save_path + "hash_table.csv"
+        hash_table_path = save_path + "hash_table_" + str(hash_bits) + ".csv"
         save_hash_table(resnet, x_train, file_path=hash_table_path)
 
     elif args.mode == 'retrieval':
-        # Load test data
-        (x_train, y_train), (x_test, y_test) = load_data.load_data(which_data)
-        (_, img_rows, img_cols, img_channels) = x_train.shape
-
-        # Load the trained model
-        model_path = save_path + "hash_su_ae.h5"
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Trained model not found at '{model_path}'. Train the model first.")
-        resnet = load_model(model_path, custom_objects={'net_loss': hash_model.HashSupervisedAutoEncoderModel.net_loss})
-        hash_table_path = save_path + "hash_table_64.csv"
+        hash_table_path = save_path + "hash_table_" + str(hash_bits) + ".csv"
         hash_table = load_hash_table(hash_table_path)
         nearest_indices, nearest_distances = retrieve_nearest(hash_table, args.index, top_k=args.top_k)
-        refined_indices = refine_ranking(resnet, x_train, hash_table, args.index, nearest_indices, top_k=args.top_k)
+        
         print(f"Nearest {args.top_k} hashes for index {args.index}:")
         for i, (idx, dist) in enumerate(zip(nearest_indices, nearest_distances)):
             print(f"{i + 1}. Index: {idx}, Hamming Distance: {dist:.4f}")
-        retrieve_and_plot_nearest(args.image_folder, hash_table, args.index, top_k=args.top_k)    
-    
+        retrieve_and_plot_nearest(args.image_folder, hash_table, args.index, top_k=args.top_k)
+
     elif args.mode == 'evaluation':
         # Load test data
         (x_train, y_train), (x_test, y_test) = load_data.load_data(which_data)
@@ -356,7 +313,6 @@ if __name__ == '__main__':
         # Plot training metrics
         training_log_path = save_path + "training_log.csv"
         plot_training_metrics(training_log_path)
-
 """
 ### Usage:
 1. **Training Mode**:
@@ -365,4 +321,6 @@ if __name__ == '__main__':
 2. **Retrieval Mode**:
    python hash_su_ae_train.py --mode retrieval --index 5 --top_k 11
 
+3. **Evaluation Mode**:
+    python hash_su_ae_train.py --mode evaluation --top_k 11
 """
